@@ -15,9 +15,7 @@ class ConditioningMethod(object):
 
     @staticmethod
     def excluding_extreme(distribution, data, length_extreme_event: int = 1):
-        return ConditioningMethod.no_conditioning(
-            distribution, data
-        ) + np.sum(distribution.logpdf(data)[-length_extreme_event:])
+        return ConditioningMethod.no_conditioning(distribution, data) + np.sum(distribution.logpdf(data)[-length_extreme_event:])
 
     @staticmethod
     def conditioning_excluding_extreme(
@@ -33,19 +31,24 @@ class ConditioningMethod(object):
     def full_conditioning_including_extreme(
             distribution, data, threshold=None, historical_sample_size: int = 0, length_extreme_event: int = 1,
     ):
+        a = len(threshold)
+        extended_thresh = threshold.copy() + [0] * (len(data) - len(threshold))
+
         if threshold is None:
             raise ValueError("This metric requires a input threshold.")
-        return (ConditioningMethod.no_conditioning(distribution, data) + np.log(np.sum(distribution.sf(threshold)[-length_extreme_event:])) + np.sum(
-            distribution.logcdf(threshold)[historical_sample_size:-length_extreme_event]))
+        return (ConditioningMethod.no_conditioning(distribution, data) + np.log(np.sum(distribution.sf(extended_thresh)[a - length_extreme_event:a])) + np.sum(
+            distribution.logcdf(extended_thresh)[historical_sample_size:a - length_extreme_event]))
 
     @staticmethod
     def full_conditioning_excluding_extreme(
             distribution, data, threshold=None, historical_sample_size: int = 0, length_extreme_event: int = 1
     ):
+        a = len(threshold)
+        extended_thresh = threshold.copy() + [0] * (len(data) - len(threshold))
         # when the input are the dataset and threshold stopped before the extreme event
         if threshold is None:
             raise ValueError("This metric requires a input threshold.")
-        return (ConditioningMethod.no_conditioning(distribution, data) + np.sum(distribution.logcdf(threshold)[historical_sample_size:]))
+        return (ConditioningMethod.no_conditioning(distribution, data) + np.sum(distribution.logcdf(extended_thresh)[historical_sample_size:a]))
 
     ### BIVARIATE ###
     @staticmethod
@@ -88,8 +91,7 @@ class ConditioningMethod(object):
         if threshold is None:
             raise ValueError("This metric requires a input threshold.")
         d1_ind, d2_ind = ConditioningMethod.common_indices(data, stopping_data)
-        return -np.sum(joint_structure.pdf(np.array(list(zip(distribution.cdf(data)[d1_ind],
-                                                             correlated_margin.cdf(stopping_data)[d2_ind]))), log=True)) - np.sum(distribution.logpdf(data)) - np.sum(
+        return -np.sum(joint_structure.pdf(np.array(list(zip(distribution.cdf(data)[d1_ind], correlated_margin.cdf(stopping_data)[d2_ind]))), log=True)) - np.sum(distribution.logpdf(data)) - np.sum(
             correlated_margin.logpdf(stopping_data)) + np.sum(correlated_margin.logcdf(threshold)[historical_sample_size:])
 
     @staticmethod
@@ -165,4 +167,3 @@ class ConditioningMethod(object):
         d1_ind = np.where(d1.index.isin(common_indices))
         d2_ind = np.where(d2.index.isin(common_indices))
         return d1_ind, d2_ind
-

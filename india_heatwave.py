@@ -4,12 +4,13 @@ from functools import partial
 import matplotlib
 from copulae import GumbelCopula
 
-from conditioning_methods import ConditioningMethod, shape_stability_conditioning
+from conditioning_methods import ConditioningMethod
 from data import jodhpur_coords, bikaner_coords
-from parameters import ConstantParameter
 from pykelihood.distributions import GEV
 from pykelihood.kernels import linear
+from pykelihood.parameters import ConstantParameter
 from pykelihood.profiler import Profiler
+from pykelihood_distributions import GEV_reparametrized_loc, GEV_reparametrized
 from timing_bias import StoppingRule
 
 matplotlib.rcParams['text.usetex'] = True
@@ -34,28 +35,41 @@ stations = stations[((stations.LATITUDE == bikaner_coords[0]) & (stations.LONGIT
                     | ((stations.LATITUDE == jodhpur_coords[0]) & (stations.LONGITUDE == jodhpur_coords[-1]))]
 
 
-def fit_gev_Tx_with_trend(x, y):
+def fit_gev_Tx_with_trend(x, y, rl=None):
+    reparam = True if rl is not None else False
     mu0_init, sigma_init, shape_init = fit_gev_Tx_without_trend(y).flattened_params
-    alpha_init = 0.
-    if y.name == 'IN019180500':
-        fit = GEV.fit(y, loc=linear(x=x), x0=[mu0_init, alpha_init, sigma_init, shape_init])
-    else:
-        fit = GEV.fit(y, loc=linear(x=x), x0=[mu0_init, alpha_init, sigma_init, shape_init], score=shape_stability_conditioning)
+    alpha_init = -0.5
+    gev = GEV.fit(y, loc=linear(x=x), x0=[mu0_init, alpha_init, sigma_init, shape_init])
+    if not reparam:
+        return gev
+    fit = GEV_reparametrized_loc(p=1 / rl, r=linear(x=x),
+                                 scale=gev.scale()).fit_instance(y, x0=(gev.isf(1 / rl).mean(), alpha_init, gev.scale(), gev.shape()))
     return fit
 
 
-def fit_gev_Tx_without_trend(y):
+def fit_gev_Tx_without_trend(y, rl=None):
+    reparam = True if rl is not None else False
     if y.name == 'IN019180500':
-        return GEV.fit(y, x0=(y.mean(), y.std(), 0.))
+        gev = GEV.fit(y, x0=(y.mean(), y.std(), 0.))
+        if reparam and (rl is not None):
+            r = gev.isf(1 / rl)
+            return GEV_reparametrized(p=1 / rl, shape=gev.shape(), loc=gev.loc(), r=r).fit_instance(y)
+        else:
+            return gev
     else:
-        return GEV.fit(y, x0=(y.mean(), y.std(), 0.), score=shape_stability_conditioning)
+        gev = GEV.fit(y, x0=(y.mean(), y.std(), 0.))
+        if reparam and (rl is not None):
+            r = gev.isf(1 / rl)
+            return GEV_reparametrized_loc(p=1 / rl, shape=gev.shape(), scale=gev.scale(), r=r).fit_instance(y)
+        else:
+            return gev
 
 
-def compute_alternative_profiles(fit, y, x=None, trend=False, infconf=0.95):
+def compute_alternative_profiles(fit, y, x=None, trend=False, infconf=0.95, return_period=100):
     historical_sample_size = len([i for i in y.index if i <= 2010])
     sr = StoppingRule(data=y, k=30, distribution=fit, func=StoppingRule.fixed_to_1981_2010_average,
                       historical_sample_size=historical_sample_size)
-    thresh, N = sr()
+    thresh, N = sr.c, sr.N
     len_extreme_event = 1
     if y.index.max() == 2016:
         full_cond = Profiler(distribution=fit, data=y, inference_confidence=infconf,
@@ -63,17 +77,17 @@ def compute_alternative_profiles(fit, y, x=None, trend=False, infconf=0.95):
                                                     historical_sample_size=historical_sample_size,
                                                     length_extreme_event=len_extreme_event,
                                                     threshold=thresh),
-                             name='Conditioning including extreme event', single_profiling_param='shape')
-        ex_fit = fit_gev_Tx_without_trend(y.loc[:2015]) if not trend else fit_gev_Tx_with_trend(x.loc[:2015], y.loc[:2015])
+                             name='Conditioning including extreme event', single_profiling_param='r')
+        ex_fit = fit_gev_Tx_without_trend(y.loc[:2015], rl=return_period) if not trend else fit_gev_Tx_with_trend(x.loc[:2015], y.loc[:2015], rl=return_period)
         excluding = Profiler(distribution=ex_fit, data=y.loc[:2015],
-                             name='Excluding extreme event', inference_confidence=infconf, single_profiling_param='shape')
+                             name='Excluding extreme event', inference_confidence=infconf, single_profiling_param='r')
         thresh_ex = thresh[:-len_extreme_event]
         excluding_cond = Profiler(distribution=fit, data=y.loc[:2015],
                                   score_function=partial(ConditioningMethod.full_conditioning_excluding_extreme,
                                                          historical_sample_size=historical_sample_size,
                                                          length_extreme_event=len_extreme_event,
                                                          threshold=thresh_ex),
-                                  name='Conditioning excluding extreme event', inference_confidence=infconf, single_profiling_param='shape')
+                                  name='Conditioning excluding extreme event', inference_confidence=infconf, single_profiling_param='r')
     else:
         full_cond = None
         excluding = None
@@ -84,27 +98,27 @@ def compute_alternative_profiles(fit, y, x=None, trend=False, infconf=0.95):
                                                          historical_sample_size=historical_sample_size,
                                                          length_extreme_event=len_extreme_event,
                                                          threshold=thresh_ex),
-                                  name='Conditioning excluding extreme event', single_profiling_param='shape')
+                                  name='Conditioning excluding extreme event', single_profiling_param='r')
     return [excluding, excluding_cond, full_cond]
 
 
-def compute_timevarying_profile_pairs(year, y, infconf=0.95):
+def compute_timevarying_profile_pairs(year, y, infconf=0.95, return_period=100):
     historical_sample_size = len([i for i in y.index if i <= 2010])
     obs = y.loc[:year]
-    fit = fit_gev_Tx_without_trend(y.loc[:max(year, 2016)])
+    fit = fit_gev_Tx_without_trend(y.loc[:max(year, 2016)], rl=return_period)
     sr = StoppingRule(data=y, k=30, distribution=fit, func=StoppingRule.fixed_to_1981_2010_average,
                       historical_sample_size=historical_sample_size)
-    thresh, N = sr()
+    thresh, N = sr.c, sr.N
     len_extreme_event = 1
-    std_prof = Profiler(distribution=fit_gev_Tx_without_trend(obs), data=obs, name=f'Standard fit {year}',
-                        inference_confidence=infconf)
+    std_prof = Profiler(distribution=fit_gev_Tx_without_trend(obs, rl=return_period), data=obs, name=f'Standard fit {year}',
+                        inference_confidence=infconf, single_profiling_param='r')
     if year >= 2016:
         cond = Profiler(distribution=fit, data=obs, inference_confidence=infconf,
                         score_function=partial(ConditioningMethod.full_conditioning_including_extreme,
                                                historical_sample_size=historical_sample_size,
                                                length_extreme_event=len_extreme_event,
                                                threshold=thresh),
-                        name=f'Conditioned fit {year}')
+                        name=f'Conditioned fit {year}', single_profiling_param='r')
     else:
         thresh_ex = thresh[:-(len(y.loc[:2016]) - len(obs))]
         cond = Profiler(distribution=fit, data=obs, inference_confidence=infconf,
@@ -112,7 +126,7 @@ def compute_timevarying_profile_pairs(year, y, infconf=0.95):
                                                historical_sample_size=historical_sample_size,
                                                length_extreme_event=len_extreme_event,
                                                threshold=thresh_ex),
-                        name=f'Conditioned fit {year}')
+                        name=f'Conditioned fit {year}', single_profiling_param='r')
     return [std_prof, cond]
 
 
@@ -124,12 +138,15 @@ def plot_loc_vs_anomaly(y, profile):
     scaled_years = ((years - y.index.min()) / (y.index.max() - y.index.min()))
     x = pd.Series(scaled_years, index=years)
     locs = [opt.loc.with_covariate(np.array([i]))()[0] for i in x]
-    df = pd.DataFrame([x.values, locs, locs + opt.scale(), locs + 2 * opt.scale()],
+    scales = [opt.scale()] * len(locs)
+    loc_scale = [loc + scale for (loc, scale) in zip(locs, scales)]
+    loc_2scale = [loc + 2 * scale for (loc, scale) in zip(locs, scales)]
+    df = pd.DataFrame([x.values, locs, loc_scale, loc_2scale],
                       columns=x.index,
                       index=['time', 'loc_par', 'loc_plus_sigma', 'loc_plus_2sigma']) \
         .T
     fig, ax = plt.subplots(figsize=(7, 5), constrained_layout=True)
-    ax.scatter(y.index, y, s=16, marker='x', color='royalblue')
+    ax.scatter(y.index, y, s=16, marker='x', color='black')
     ax.set_xlim(int(y.index.min() / 10) * 10, 2020)
     ax.set_ylim(43, 51)
     ax.set_xlabel('time (years)')
@@ -150,8 +167,7 @@ def plot_loc_vs_anomaly(y, profile):
     return fig
 
 
-def plot_return_levels(y, profile, level):
-    opt = profile.optimum[0]
+def plot_return_levels(x, y, level, ex_trigger=False):
     logrange = np.logspace(np.log10(1 + 1e-2), np.log10(10000), 100)
     first_year = 1973
     last_year = np.unique(y._get_label_or_level_values('YEAR'))[-1]
@@ -162,15 +178,18 @@ def plot_return_levels(y, profile, level):
     for color, year, i in zip(['royalblue', 'red'], [first_year, last_year], [0, -1]):
         name = f'GEV shift fit {year}'
         cis = []
-        if 'xcluding' in profile.name and year == 2016:
+        if ex_trigger and year == 2016:
             i = i - 1
         idx_y = [i for i in y.index if int(i / 10) * 10 == int(year / 10) * 10][i]
         idx = y.reset_index()[y.reset_index()['YEAR'] == idx_y].index[0]
-        rls = [opt.isf(1 / k)[idx] for k in logrange]
+        rls = []
         for k in logrange:
-            metric = lambda x: x.isf(1 / k)[idx]
-            cis.append(profile.confidence_interval(metric))
-        phalodi_level = 1 / opt.sf(level)[idx]
+            fit = GEV_reparametrized_loc.fit(y, r=linear(x), x0=(y.mean(), 0., y.std(), 0.))
+            p = Profiler(fit, y, inference_confidence=0.95)
+            rls.append(fit.isf(1 / k)[idx])
+            print(f'Computing CI for k={k}')
+            cis.append(p.confidence_interval(lambda x: x.isf(1 / k)[idx]))
+        phalodi_level = 1 / fit.sf(level)[idx]
         levs.append(phalodi_level)
         lbs = [lb for (lb, ub) in cis]
         ubs = [ub for (lb, ub) in cis]
@@ -187,7 +206,7 @@ def plot_return_levels(y, profile, level):
         ax.plot(logrange[25:], ubs[25:], color=color, linewidth=0.6, linestyle='--')
         real_rt = 1 / (1 - np.arange(0, n) / n)
         if i == 0:
-            scaled_y = sorted_y - (opt.loc().loc[idx_y] - opt.flattened_param_dict['loc_a'].value)
+            scaled_y = sorted_y - (fit.r().loc[idx_y] - fit.flattened_param_dict['r_a'].value)
         else:
             scaled_y = sorted_y
         ax.scatter(real_rt, scaled_y, s=10, marker='x', color=color)
@@ -205,17 +224,17 @@ def plot_return_levels(y, profile, level):
     return fig
 
 
-def segment_plot(profiles, y, state):
+def segment_plot(profile_dic, y, state):
     fig, ax = plt.subplots(figsize=(15, 5), constrained_layout=True)
     logrange = np.linspace(150, 2000, 10).astype(int)
-    infconf = profiles[0].inference_confidence
+    infconf = profile_dic[150][0].inference_confidence
     for k in logrange:
         i = 0
+        profiles = profile_dic[k]
         for profile, color in zip(profiles,
                                   ['salmon', 'pink', 'navy', 'royalblue']):
-            metric = lambda x: x.isf(1 / k)
-            ci1, ci2 = profile.confidence_interval(metric)
-            rl = profile.optimum[0].isf(1 / k)
+            ci1, ci2 = profile.confidence_interval_bs('r', precision=1e-3)
+            rl = profile.optimum[0].r()
             if k == 150:
                 ax.vlines(k + i, ci1, ci2, color=color, label=profile.name)
             else:
@@ -262,7 +281,7 @@ def fig_std_cond_comparison(dic, state, level):
     years = list(dic.keys())
     logrange = [100, 1000, 10000]
     fig, axes = plt.subplots(ncols=3, figsize=(15, 5), constrained_layout=True)
-    infconf = dic[years[0]][0].inference_confidence
+    infconf = dic[years[0]][100][0].inference_confidence
     for k, ax in zip(logrange, axes.flatten()):
         std_rls = []
         std_lbs = []
@@ -271,15 +290,14 @@ def fig_std_cond_comparison(dic, state, level):
         cond_lbs = []
         cond_ubs = []
         for year in dic:
-            std_prof = dic[year][0]
-            cond_prof = dic[year][-1]
-            std_rls.append(std_prof.optimum[0].isf(1 / k))
-            cond_rls.append(cond_prof.optimum[0].isf(1 / k))
-            metric = lambda x: x.isf(1 / k)
-            lb, ub = std_prof.confidence_interval(metric)
+            std_prof = dic[year][k][0]
+            cond_prof = dic[year][k][-1]
+            std_rls.append(std_prof.optimum[0].r())
+            cond_rls.append(cond_prof.optimum[0].r())
+            lb, ub = std_prof.confidence_interval_bs('r', precision=1e-3)
             std_lbs.append(lb)
             std_ubs.append(ub)
-            lb, ub = cond_prof.confidence_interval(metric)
+            lb, ub = cond_prof.confidence_interval_bs('r', precision=1e-3)
             cond_lbs.append(lb)
             cond_ubs.append(ub)
         ax.plot(years, std_rls, color='red', label='Standard fit', linewidth=0.7)
@@ -307,6 +325,7 @@ def fig_std_cond_comparison(dic, state, level):
         ax.legend(loc='best')
         ax.set_ylabel('daily max temperature ($^\circ$C)')
         ax.set_title(f'{k}-year return level')
+        ax.set_ylim((48.2, 55.5))
     fig.suptitle(f'TXx {state} May-June {np.min(years)}-{np.max(years)} ({int(100 * infconf)}\% CI)')
     return fig
 
@@ -339,7 +358,7 @@ def fit_gumbel_biv(data):
     return joint, margs
 
 
-def compute_timevarying_profile_pairs_using_bivariate_distribution(year, biv_data, infconf=0.95):
+def compute_timevarying_profile_pairs_using_bivariate_distribution(year, biv_data, infconf=0.95, return_period=100):
     y_jod = biv_data[biv_data.columns[-1]].dropna()
     y_bik = biv_data[biv_data.columns[0]].dropna()  # common_data[common_data.columns[0]]
     x_bik = pd.Series((y_bik.loc[:year].index - y_bik.loc[:year].index.min()) / (y_bik.loc[:year].index.max() - y_bik.loc[:year].index.min()), index=y_bik.loc[:year].index).rename('time')
@@ -347,19 +366,19 @@ def compute_timevarying_profile_pairs_using_bivariate_distribution(year, biv_dat
     historical_sample_size = len([i for i in y_jod.index if i <= 2010])
     joint, margs = fit_gumbel_biv(biv_data)
     # The dataset from Jodhpur is the one that stops when the threshold is reached
-    fit = fit_gev_Tx_without_trend(y_jod.loc[:max(year, 2016)])
+    fit = fit_gev_Tx_without_trend(y_jod.loc[:max(year, 2016)], rl=return_period)
     sr = StoppingRule(data=y_jod, k=30, distribution=fit, func=StoppingRule.fixed_to_1981_2010_average,
                       historical_sample_size=historical_sample_size)
-    thresh, N = sr()
-    fit_jod = fit_gev_Tx_with_trend(x_jod.loc[:year], y_jod.loc[:year])
-    fit_bik = fit_gev_Tx_with_trend(x_bik.loc[:year], y_bik.loc[:year])  # best fit for bikaner with all of the available data
-    fit_bik_fixed_trend = GEV(loc=linear(a=fit_bik.loc.a, b=ConstantParameter(fit_bik.loc.b.value), x=x_bik),
-                              scale=fit_bik.scale(), shape=fit_bik.shape())
-    fit_jod_fixed_trend = GEV(loc=linear(a=fit_jod.loc.a, b=ConstantParameter(fit_jod.loc.b.value), x=x_jod),
-                              scale=fit_jod.scale(), shape=fit_jod.shape())
+    thresh, N = sr.c, sr.N
+    fit_jod = fit_gev_Tx_with_trend(x_jod.loc[:year], y_jod.loc[:year], rl=return_period)
+    fit_bik = fit_gev_Tx_with_trend(x_bik.loc[:year], y_bik.loc[:year], rl=return_period)
+    fit_bik_fixed_trend = GEV_reparametrized_loc(p=1 / return_period, r=linear(a=fit_bik.r.a, b=ConstantParameter(fit_bik.r.b()), x=x_bik),
+                                                 scale=fit_bik.scale(), shape=fit_bik.shape()) if return_period is not None else fit_bik
+    fit_jod_fixed_trend = GEV_reparametrized_loc(p=1 / return_period, r=linear(a=fit_jod.r.a, b=ConstantParameter(fit_jod.r.b()), x=x_jod),
+                                                 scale=fit_jod.scale(), shape=fit_jod.shape()) if return_period is not None else fit_jod
     # std Independant fit for Bikaner
-    ind = Profiler(distribution=fit_bik, data=y_bik.loc[:year], name=f'Standard fit {year}',
-                   inference_confidence=infconf)
+    ind = Profiler(distribution=fit_bik_fixed_trend, data=y_bik.loc[:year], name=f'Independent fit {year}',
+                   inference_confidence=infconf, single_profiling_param='r_a')
     if year >= 2016:
         margin = fit_jod_fixed_trend.fit_instance(y_jod.loc[:year],
                                                   score=partial(ConditioningMethod.full_conditioning_including_extreme,
@@ -395,30 +414,76 @@ def compute_timevarying_profile_pairs_using_bivariate_distribution(year, biv_dat
     # the conditional fit only uses years in common for Jodphur and Bikaner as well as complete info about values above and below the threshold in the Jodhpur series
     std = Profiler(distribution=fit_bik_fixed_trend, data=y_bik.loc[:year], inference_confidence=infconf,
                    score_function=crule_std,
-                   name=f'Conditioned fit {year}')
+                   name=f'Standard fit {year}', single_profiling_param='r_a')
     cond = Profiler(distribution=fit_bik_fixed_trend, data=y_bik.loc[:year], inference_confidence=infconf,
                     score_function=crule_cond,
-                    name=f'Conditioned fit {year}')
+                    name=f'Conditioned fit {year}', single_profiling_param='r_a')
     return [ind, std, cond]
 
 
-def fig_std_cond_comparison_biv(dic, state, level):
+def fig_std_cond_comparison_biv(dic, state):
     years = list(dic.keys())
     logrange = [100, 1000, 10000]
     fig, axes = plt.subplots(ncols=3, figsize=(15, 5), constrained_layout=True)
-    infconf = dic[years[0]][0].inference_confidence
+    infconf = dic[years[0]][logrange[0]][0].inference_confidence
+
+    def get_ci_from_trend_params_bounds(profile, idx):
+        try:
+            rl = float(profile.optimum[0].r())
+            lb, ub = profile.confidence_interval_bs('r', 1e-3)
+        except:
+            lb, ub = profile.confidence_interval(lambda x: x.r().iloc[idx])
+            rl = profile.optimum[0].r().iloc[idx]
+        return rl, (lb, ub)
+
     for k, ax in zip(logrange, axes.flatten()):
         std_rls = []
         ind_rls = []
         cond_rls = []
+        std_lbs = []
+        std_ubs = []
+        cond_lbs = []
+        cond_ubs = []
+        ind_lbs = []
+        ind_ubs = []
         for year in dic:
-            ind_prof = dic[year][0]
-            idx_year = list(np.where(ind_prof.data.index <= year))[0][-1]
-            std_prof = dic[year][1]
-            cond_prof = dic[year][-1]
-            ind_rls.append(float(ind_prof.optimum[0].isf(1 / k)[idx_year]))
-            std_rls.append(float(std_prof.optimum[0].isf(1 / k)[idx_year]))
-            cond_rls.append(float(cond_prof.optimum[0].isf(1 / k)[idx_year]))
+            print(f'Plotting std cond comparison fig for Bikaner for year {year} and RL {k}')
+            ind_prof = dic[year][k][0]
+            idx = list(np.where(ind_prof.data.index <= year))[0][-1]
+            std_prof = dic[year][k][1]
+            cond_prof = dic[year][k][-1]
+            for prof, rl, lb_list, ub_list in zip([ind_prof, std_prof, cond_prof],
+                                                  [ind_rls, std_rls, cond_rls],
+                                                  [ind_lbs, std_lbs, cond_lbs],
+                                                  [ind_ubs, std_ubs, cond_ubs]):
+                r, ci = get_ci_from_trend_params_bounds(prof, idx)
+                rl.append(r)
+                lb_list.append(ci[0])
+                ub_list.append(ci[-1])
+        for i in [0, 5, -1]:
+            if i == -1:
+                y = years[i] - 0.4
+            else:
+                y = years[i]
+            ax.vlines(y, std_lbs[i], std_ubs[i], color='salmon', linewidth=0.5)
+            ax.hlines(std_ubs[i], y - 0.2, y + 0.2, color='salmon', linewidth=0.5)
+            ax.hlines(std_lbs[i], y - 0.2, y + 0.2, color='salmon', linewidth=0.5)
+        for i in [0, 5, -1]:
+            if i == -1:
+                y = years[i] - 0.2
+            else:
+                y = years[i] + 0.2
+            ax.vlines(y, cond_lbs[i], cond_ubs[i], color='navy', linewidth=0.5)
+            ax.hlines(cond_ubs[i], y - 0.2, y + 0.2, color='navy', linewidth=0.5)
+            ax.hlines(cond_lbs[i], y - 0.2, y + 0.2, color='navy', linewidth=0.5)
+        for i in [0, 5, -1]:
+            if i == -1:
+                y = years[i]
+            else:
+                y = years[i] + 0.4
+            ax.vlines(y, ind_lbs[i], ind_ubs[i], color='goldenrod', linewidth=0.5)
+            ax.hlines(ind_ubs[i], y - 0.2, y + 0.2, color='goldenrod', linewidth=0.5)
+            ax.hlines(ind_lbs[i], y - 0.2, y + 0.2, color='goldenrod', linewidth=0.5)
         ax.plot(years, std_rls, color='salmon', label='Standard fit', linewidth=0.7)
         ax.scatter(years, std_rls, color='salmon', s=10, marker='x')
         ax.plot(years, cond_rls, color='navy', label='Conditioned fit', linewidth=0.7)
@@ -429,6 +494,7 @@ def fig_std_cond_comparison_biv(dic, state, level):
         ax.legend(loc='best')
         ax.set_ylabel('daily max temperature ($^\circ$C)')
         ax.set_title(f'{k}-year return level')
+        ax.set_ylim((48.4, 49.5))
     fig.suptitle(f'TXx {state} May-June {np.min(years)}-{np.max(years)} ({int(100 * infconf)}\% CI)')
     return fig
 
@@ -449,7 +515,7 @@ def plot_joint_distribution(biv_data):
         dic_indep[level] = [[i, float(margs[0].inverse_cdf(level / margs[1].cdf(i)))] for i in np.linspace(43, 50, 100)]
     bik_data = biv_data[biv_data.columns[0]]
     jod_data = biv_data[biv_data.columns[-1]]
-    fig, (ax1, ax2) = plt.subplots(ncols=2, figsize=(11, 6), constrained_layout=True)
+    fig, (ax1, ax2) = plt.subplots(ncols=2, figsize=(12, 6), constrained_layout=True)
     plot_lines = []
     cmap = matplotlib.cm.get_cmap('BuPu')
     for level in dic_theo.keys():
@@ -464,7 +530,8 @@ def plot_joint_distribution(biv_data):
         l1, = ax2.plot(bik, jod, color=color, linestyle='--')
         plot_lines.append([l2, l1])
     ax2.set_title('b) Quantiles from the joint cumulative distribution function')
-    ax2.set_xlim(None, 49.)
+    ax2.set_ylim(None, 49.)
+    ax2.set_xlim(None, 50.)
     legend1 = ax2.legend([l[0] for l in plot_lines], dic_theo.keys(), loc='upper left')
     legend2 = ax2.legend(plot_lines[1], [r"Corr. with $\alpha$" + f"={np.round(1 / theta, 2)}", "Indep."], loc='lower right')
     ax2.add_artist(legend1)
@@ -473,8 +540,8 @@ def plot_joint_distribution(biv_data):
     ax1 = plot_joint_pdf(joint, margs, ax=ax1)
     ax1.scatter(bik_data, jod_data, color='black', s=6, marker='x', label='Observed')
     ax1.legend()
-    ax1.set_xlim(ax2.get_xlim())
-    ax1.set_ylim(ax2.get_ylim())
+    ax1.set_xlim(ax2.get_ylim())
+    ax1.set_ylim(ax2.get_xlim())
     return fig
 
 
@@ -503,5 +570,5 @@ def plot_joint_pdf(joint, margs, ax=None, ticks_nbr=25):
     ax.set_xlabel('daily max temperature ($^\circ$C) in Bikaner')
     ax.set_ylabel('daily max temperature ($^\circ$C) in Jodhpur')
     ax.set_title('a) Joint density contour')
-    plt.colorbar(cs, ticks=[0.01, 0.1, 1, 10, 100], ax=ax, location='left')
+    plt.colorbar(cs, ticks=[0.01, 0.1, 1, 10, 100], ax=ax, location='left', shrink=0.7)
     return ax

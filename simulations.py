@@ -7,6 +7,7 @@ from typing import Callable, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 from conditioning_methods import ConditioningMethod
 from pykelihood.distributions import Distribution, Uniform
@@ -14,6 +15,7 @@ from pykelihood.profiler import Profiler
 from timing_bias import StoppingRule
 
 warnings.filterwarnings('ignore')
+SIM_PATH = "/Users/Boubou/Documents/GitHub/Venezuela-Data/Timing Bias/new95/"
 
 USE_POOL = True
 
@@ -39,49 +41,62 @@ class SimulationEVD(object):
         pass
 
     def RRMSE(self):
-        print(f"Computing the mean RRMSE for the {self.n_iter} samples...")
-        RRMSE = {}
-        for name in self.rl_estimates.keys():
-            RRMSE[name] = {}
-            for k in self.rl_estimates[name].keys():
-                non_null = [j for j in self.rl_estimates[name][k] if j is not None and j < 1000]
-                sqrt = np.sqrt(np.mean((np.array(non_null) - self.true_return_level) ** 2))
-                RRMSE[name][k] = (1 / self.true_return_level) * sqrt
+        rle = self.rl_estimates
+        true_rl = self.true_return_level
+        if hasattr(self, 'above_threshold'):
+            above_threshold = self.above_threshold
+        else:
+            above_threshold = None
+        RRMSE = RRMSE_from_dict(rle, true_rl, above_threshold)
         return RRMSE
 
     def RelBias(self):
-        print(f"Computing the mean relative bias for the {self.n_iter} samples...")
-        RelBias = {}
-        for name in self.rl_estimates.keys():
-            RelBias[name] = {}
-            for k in self.rl_estimates[name].keys():
-                non_null = [j for j in self.rl_estimates[name][k] if j is not None and j < 1000]
-                relbias = (1 / self.true_return_level) * np.mean(non_null) - 1
-                RelBias[name][k] = relbias
+        rle = self.rl_estimates
+        true_rl = self.true_return_level
+        if hasattr(self, 'above_threshold'):
+            above_threshold = self.above_threshold
+        else:
+            above_threshold = None
+        RelBias = RelBias_from_dict(rle, true_rl, above_threshold)
         return RelBias
 
     def CI_Coverage(self):
-        print(f"Computing the mean CI Coverage for the {self.n_iter} samples...")
-        CIC = {}
-        for name in self.CI.keys():
-            CIC[name] = {}
-            for k in self.CI[name].keys():
-                non_null = [(lb, ub) for (lb, ub) in self.CI[name][k] if
-                            lb is not None and ub is not None and ub - lb < 1000]
-                bools = [lb <= self.true_return_level <= ub
-                         for lb, ub in non_null]
-                CIC[name][k] = sum(bools) / len(bools) if bools else 0.
+        CI = self.CI
+        true_rl = self.true_return_level
+        if hasattr(self, 'above_threshold'):
+            above_threshold = self.above_threshold
+        else:
+            above_threshold = None
+        CIC = CI_Coverage_from_dict(CI, true_rl, above_threshold)
         return CIC
 
+    def UB_Cerror(self):
+        CI = self.CI
+        true_rl = self.true_return_level
+        if hasattr(self, 'above_threshold'):
+            above_threshold = self.above_threshold
+        else:
+            above_threshold = None
+        UBCE = UB_Cerror_from_dict(CI, true_rl, above_threshold)
+        return UBCE
+
+    def LB_Cerror(self):
+        CI = self.CI
+        true_rl = self.true_return_level
+        if hasattr(self, 'above_threshold'):
+            above_threshold = self.above_threshold
+        else:
+            above_threshold = None
+        LBCE = LB_Cerror_from_dict(CI, true_rl, above_threshold)
+        return LBCE
+
     def CI_Width(self):
-        print(f"Computing the mean CI Width for the {self.n_iter} samples...")
-        CIW = {}
-        for name in self.CI.keys():
-            CIW[name] = {}
-            for k in self.CI[name].keys():
-                non_null = [ub - lb for (lb, ub) in self.CI[name][k] if
-                            lb is not None and ub is not None and ub - lb < 1000]
-                CIW[name][k] = np.mean(non_null)
+        CI = self.CI
+        if hasattr(self, 'above_threshold'):
+            above_threshold = self.above_threshold
+        else:
+            above_threshold = None
+        CIW = CI_Width_from_dict(CI, above_threshold)
         return CIW
 
 
@@ -107,13 +122,8 @@ class SimulationWithStoppingRuleAndConditioning(SimulationEVD):
         CI = {name: {x: [] for x in return_periods_for_threshold} for name, v in conditioning_rules}
         datasets = (pd.Series(np.concatenate([self.historical_sample,
                                               self.ref_distri.rvs(self.sample_size)]))
-                    for _ in range(self.n_iter))
-        if USE_POOL:
-            pool = Pool(4)
-            results = pool.map(self.__call__, datasets)
-            pool.close()
-        else:
-            results = [self(ds) for ds in datasets]
+                   for _ in range(self.n_iter))
+        results = [self.run(ds) for ds in tqdm(datasets, total=self.n_iter)]
         for res in results:
             for name, v in res.items():
                 for k, value in v.items():
@@ -122,8 +132,7 @@ class SimulationWithStoppingRuleAndConditioning(SimulationEVD):
         self.rl_estimates = rl_estimates
         self.CI = CI
 
-    def __call__(self, data):
-        time_start = time.time()
+    def run(self, data):
         res = {name: {} for name, _ in self.conditioning_rules}
         for x in self.return_periods_for_threshold:
             if self.stopping_rule_func == StoppingRule.fixed_to_k:
@@ -139,13 +148,8 @@ class SimulationWithStoppingRuleAndConditioning(SimulationEVD):
                       for (name, crule) in self.conditioning_rules if name
                       not in std_conditioning] \
                      + [(name, crule) for (name, crule) in self.conditioning_rules if name in std_conditioning]
-            f = partial(to_run_in_parallel,
-                        *[data_stopped, self.ref_distri, self.return_period])
             for name, c in crules:
-                res[name][x] = f((name, c))
-        time_elapsed = time.time() - time_start
-        memMb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0 / 1024.0
-        print("%5.1f secs %5.1f MByte" % (time_elapsed, memMb))
+                res[name][x] = estimate_return_level(data_stopped, self.ref_distri, self.return_period, (name, c))
         return res
 
 
@@ -156,7 +160,7 @@ class SimulationWithStoppingRuleAndConditioningForConditionedObservations(Simula
                  conditioning_rules: Sequence[Tuple[str, Callable]],
                  return_periods_for_threshold,
                  return_period: int = 200,
-                 sample_size: int = 275):
+                 sample_size: int = 225):
         self.stopping_rule_func = StoppingRule.fixed_to_k
         self.conditioning_rules = conditioning_rules
         self.return_periods_for_threshold = return_periods_for_threshold
@@ -184,7 +188,7 @@ class SimulationWithStoppingRuleAndConditioningForConditionedObservations(Simula
     def __call__(self, x):
         time_start = time.time()
         res = {name: {x: []} for name, _ in self.conditioning_rules}
-        k = self.ref_distri.isf(1/x)
+        k = self.ref_distri.isf(1 / x)
         for _ in range(self.n_iter):
             data = self.historical_sample
             sf_quantile = self.ref_distri.sf(k)
@@ -203,7 +207,7 @@ class SimulationWithStoppingRuleAndConditioningForConditionedObservations(Simula
                        for (name, crule) in self.conditioning_rules if name
                        not in std_conditioning]
                       + [(name, crule) for (name, crule) in self.conditioning_rules if name in std_conditioning])
-            f = partial(to_run_in_parallel,
+            f = partial(estimate_return_level,
                         *[data_stopped, self.ref_distri, self.return_period])
             for name, c in crules:
                 res[name][x].append(f((name, c)))
@@ -306,20 +310,208 @@ class SimulationForTwoCorrelatedVariables(SimulationEVD):
                       for (name, crule), m in zip(self.conditioning_rules, margins) if name
                       not in std_conditioning] \
                      + [(name, crule) for (name, crule) in self.conditioning_rules if name in std_conditioning]
-            f = partial(to_run_in_parallel,
-                        *[data_stopped, self.ref_distri, self.return_period])
             for name, c in crules:
-                res[name][x] = f((name, c))
+                res[name][x] = estimate_return_level(data_stopped, self.ref_distri, self.return_period, (name, c))
         time_elapsed = time.time() - time_start
         memMb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0 / 1024.0
         print("%5.1f secs %5.1f MByte" % (time_elapsed, memMb))
         return res, at
 
 
-def to_run_in_parallel(data: pd.Series,
-                       distribution: Distribution,
-                       return_period: int,
-                       conditioning_rule: Tuple[str, Callable]):
+def RRMSE_from_dict(rle, true_return_level, above_threshold=None):
+    print(f"Computing the mean RRMSE")
+    RRMSE = {}
+    if above_threshold:
+        for i, case in zip([0, 1], ['A', 'B']):
+            RRMSE[case] = {}
+            for name in rle.keys():
+                RRMSE[case][name] = {}
+                for k in rle[name].keys():
+                    indices = np.where(np.array(above_threshold[k]) == i)
+                    non_null = [j for j in np.array(rle[name][k])[indices] if j is not None and j < 1000]
+                    sqrt = np.sqrt(np.mean((np.array(non_null) - true_return_level) ** 2))
+                    RRMSE[case][name][k] = (1 / true_return_level) * sqrt
+    else:
+        for name in rle.keys():
+            RRMSE[name] = {}
+            for k in rle[name].keys():
+                non_null = [j for j in rle[name][k] if j is not None and j < 1000]
+                sqrt = np.sqrt(np.mean((np.array(non_null) - true_return_level) ** 2))
+                RRMSE[name][k] = (1 / true_return_level) * sqrt
+    return RRMSE
+
+
+def RelBias_from_dict(rle, true_return_level, above_threshold=None):
+    print(f"Computing the mean relative bias")
+    RelBias = {}
+    if above_threshold:
+        for i, case in zip([0, 1], ['A', 'B']):
+            RelBias[case] = {}
+            for name in rle.keys():
+                RelBias[case][name] = {}
+                for k in rle[name].keys():
+                    indices = np.where(np.array(above_threshold[k]) == i)
+                    non_null = [j for j in np.array(rle[name][k])[indices] if j is not None and j < 1000]
+                    relbias = (1 / true_return_level) * np.mean(non_null) - 1
+                    RelBias[case][name][k] = relbias
+    else:
+        for name in rle.keys():
+            RelBias[name] = {}
+            for k in rle[name].keys():
+                non_null = [j for j in rle[name][k] if j is not None and j < 1000]
+                relbias = (1 / true_return_level) * np.mean(non_null) - 1
+                RelBias[name][k] = relbias
+    return RelBias
+
+
+def CI_Coverage_from_dict(CI, true_return_level, above_threshold=None):
+    print(f"Computing the mean CI Coverage")
+    CIC = {}
+    if above_threshold:
+        for i, case in zip([0, 1], ['A', 'B']):
+            CIC[case] = {}
+            for name in CI.keys():
+                CIC[case][name] = {}
+                for k in CI[name].keys():
+                    indices = np.where(np.array(above_threshold[k]) == i)
+                    non_null = [(lb, ub) for (lb, ub) in np.array(CI[name][k])[indices] if
+                                lb is not None and ub is not None and ub - lb < 1000]
+                    bools = [lb <= true_return_level <= ub
+                             for lb, ub in non_null]
+                    CIC[case][name][k] = sum(bools) / len(bools) if bools else 0.
+    else:
+        for name in CI.keys():
+            CIC[name] = {}
+            for k in CI[name].keys():
+                non_null = [(lb, ub) for (lb, ub) in CI[name][k] if
+                            lb is not None and ub is not None and ub - lb < 1000]
+                bools = [lb <= true_return_level <= ub
+                         for lb, ub in non_null]
+                CIC[name][k] = sum(bools) / len(bools) if bools else 0.
+    return CIC
+
+
+def UB_Cerror_from_dict(CI, true_return_level, above_threshold=None):
+    print(f"Computing the mean UB Coverage error")
+    UBCE = {}
+    if above_threshold:
+        for i, case in zip([0, 1], ['A', 'B']):
+            UBCE[case] = {}
+            for name in CI.keys():
+                UBCE[case][name] = {}
+                for k in CI[name].keys():
+                    indices = np.where(np.array(above_threshold[k]) == i)
+                    non_null = [(lb, ub) for (lb, ub) in np.array(CI[name][k])[indices] if
+                                lb is not None and ub is not None and ub - lb < 1000]
+                    bools = [true_return_level >= ub
+                             for lb, ub in non_null]
+                    UBCE[case][name][k] = sum(bools) / len(bools) if bools else 1.
+    else:
+        for name in CI.keys():
+            UBCE[name] = {}
+            for k in CI[name].keys():
+                non_null = [(lb, ub) for (lb, ub) in CI[name][k] if
+                            lb is not None and ub is not None and ub - lb < 1000]
+                bools = [true_return_level >= ub
+                         for lb, ub in non_null]
+                UBCE[name][k] = sum(bools) / len(bools) if bools else 1.
+                UBCE[name][k] = UBCE[name][k]
+    return UBCE
+
+
+def LB_Cerror_from_dict(CI, true_return_level, above_threshold=None):
+    print(f"Computing the mean LB Coverage error")
+    LBCE = {}
+    if above_threshold:
+        for i, case in zip([0, 1], ['A', 'B']):
+            LBCE[case] = {}
+            for name in CI.keys():
+                LBCE[case][name] = {}
+                for k in CI[name].keys():
+                    indices = np.where(np.array(above_threshold[k]) == i)
+                    non_null = [(lb, ub) for (lb, ub) in np.array(CI[name][k])[indices] if
+                                lb is not None and ub is not None and ub - lb < 1000]
+                    bools = [true_return_level <= lb
+                             for lb, ub in non_null]
+                    LBCE[case][name][k] = sum(bools) / len(bools) if bools else 1.
+    else:
+        for name in CI.keys():
+            LBCE[name] = {}
+            for k in CI[name].keys():
+                non_null = [(lb, ub) for (lb, ub) in CI[name][k] if
+                            lb is not None and ub is not None and ub - lb < 1000]
+                bools = [true_return_level <= lb
+                         for lb, ub in non_null]
+                LBCE[name][k] = sum(bools) / len(bools) if bools else 1.
+                LBCE[name][k] = LBCE[name][k]
+    return LBCE
+
+
+def CI_Width_from_dict(CI, above_threshold=None):
+    print(f"Computing the mean CI Width")
+    CIW = {}
+    if above_threshold:
+        for i, case in zip([0, 1], ['A', 'B']):
+            CIW[case] = {}
+            for name in CI.keys():
+                CIW[case][name] = {}
+                for k in CI[name].keys():
+                    indices = np.where(np.array(above_threshold[k]) == i)
+                    non_null = [(lb, ub) for (lb, ub) in np.array(CI[name][k])[indices] if
+                                lb is not None and ub is not None and ub - lb < 1000]
+                    CIW[case][name][k] = np.mean(non_null)
+    else:
+        for name in CI.keys():
+            CIW[name] = {}
+            for k in CI[name].keys():
+                non_null = [ub - lb for (lb, ub) in CI[name][k] if
+                            lb is not None and ub is not None and ub - lb < 1000]
+                CIW[name][k] = np.mean(non_null)
+    return CIW
+
+
+def excel_from_dict(rle, CI, true_return_level, filename, above_threshold=None):
+    RB = RelBias_from_dict(rle, true_return_level, above_threshold)
+    RMSE = RRMSE_from_dict(rle, true_return_level, above_threshold)
+    CI_C = CI_Coverage_from_dict(CI, true_return_level, above_threshold)
+    UB_C = UB_Cerror_from_dict(CI, true_return_level, above_threshold)
+    LB_C = LB_Cerror_from_dict(CI, true_return_level, above_threshold)
+    CI_W = CI_Width_from_dict(CI, above_threshold)
+    if above_threshold:
+        relbiasdic = {k: pd.DataFrame.from_dict(RB[k], orient='columns') for k in RB}
+        rrmsedic = {k: pd.DataFrame.from_dict(RMSE[k], orient='columns') for k in RMSE}
+        cicdic = {k: pd.DataFrame.from_dict(CI_C[k], orient='columns') for k in CI_C}
+        ciwdic = {k: pd.DataFrame.from_dict(CI_W[k], orient='columns') for k in CI_W}
+        updic = {k: pd.DataFrame.from_dict(UB_C[k], orient='columns') for k in UB_C}
+        lowdic = {k: pd.DataFrame.from_dict(LB_C[k], orient='columns') for k in LB_C}
+        for case in relbiasdic.keys():
+            excel = pd.ExcelWriter(f'{SIM_PATH}/{filename}{case}.xlsx')
+            cic = cicdic[case]
+            up = updic[case]
+            low = lowdic[case]
+            relbias = relbiasdic[case]
+            rrmse = rrmsedic[case]
+            ciw = ciwdic[case]
+            for n, d in zip(['CIC', 'UPC', 'LPC', 'CIW', 'RelBias', 'RRMSE'], [cic, up, low, ciw, relbias, rrmse]):
+                d.to_excel(excel, sheet_name=n)
+            excel.save()
+    else:
+        excel = pd.ExcelWriter(f'{SIM_PATH}/{filename}.xlsx')
+        relbias = pd.DataFrame.from_dict(RB, orient='columns')
+        rrmse = pd.DataFrame.from_dict(RMSE, orient='columns')
+        cic = pd.DataFrame.from_dict(CI_C, orient='columns')
+        up = pd.DataFrame.from_dict(UB_C, orient='columns')
+        low = pd.DataFrame.from_dict(LB_C, orient='columns')
+        ciw = pd.DataFrame.from_dict(CI_W, orient='columns')
+        for n, d in zip(['CIC', 'UPC', 'LPC', 'CIW', 'RelBias', 'RRMSE'], [cic, up, low, ciw, relbias, rrmse]):
+            d.to_excel(excel, sheet_name=n)
+        excel.save()
+
+
+def estimate_return_level(data: pd.Series,
+                          distribution: Distribution,
+                          return_period: int,
+                          conditioning_rule: Tuple[str, Callable]):
     name, cr = conditioning_rule
 
     def return_level(distribution):
@@ -330,10 +522,11 @@ def to_run_in_parallel(data: pd.Series,
                               distribution=distribution,
                               name=name,
                               score_function=cr,
-                              inference_confidence=0.99)
+                              single_profiling_param='r',
+                              inference_confidence=0.95)
         rle = return_level(likelihood.optimum[0])
-        rci = likelihood.confidence_interval(return_level)
-    except:
-        rle = return_level(distribution.fit(data, score=cr, x0=distribution.params))
+        rci = likelihood.confidence_interval_bs('r', precision=1e-2)
+    except Exception:
+        rle = return_level(distribution.fit_instance(data, score=cr))
         rci = [None, None]
     return rle, rci

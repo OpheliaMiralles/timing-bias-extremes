@@ -27,22 +27,17 @@ class StoppingRule(object):
         self.distribution = distribution
         self.stopping_rule = func
         self.historical_sample_size = historical_sample_size
-
-    def __call__(self):
-        return self.stopping_rule(self.data, self.historical_sample_size,
+        self.c, self.N = self.stopping_rule(self.data, self.historical_sample_size,
                                   self.distribution, self.k)
 
     def stopped_data(self):
-        c, N = self.__call__()
-        return self.data.iloc[:N]
+        return self.data.iloc[:self.N]
 
     def threshold(self):
-        c, N = self.__call__()
-        return c
+        return self.c
 
     def last_index(self):
-        c, N = self.__call__()
-        return N
+        return self.N
 
     @staticmethod
     def fixed_to_sample_middle_value(data: pd.Series, historical_sample_size: int,
@@ -72,13 +67,13 @@ class StoppingRule(object):
     @staticmethod
     def variable_in_the_estimated_return_level(data: pd.Series, historical_sample_size: int, distribution: "Distribution", k: int):
         j = historical_sample_size
-        fit = distribution.fit(data.iloc[:j], x0=distribution.flattened_params)
+        fit = distribution.fit_instance(data.iloc[:j])
         return_level_estimate = fit.isf(1 / k)
         return_level_estimates = [float(return_level_estimate)]* len(data.iloc[:j + 1])
         data_stopped = data.iloc[:j + 1]
         j += 1
         while data_stopped.iloc[-1] < return_level_estimate and len(data_stopped) < len(data):
-            fit = distribution.fit(data_stopped, x0=distribution.flattened_params)
+            fit = distribution.fit_instance(data_stopped)
             return_level_estimate = fit.isf(1 / k)
             return_level_estimates.append(float(return_level_estimate))
             data_stopped = data.iloc[:j + 1]
