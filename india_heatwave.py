@@ -5,7 +5,7 @@ import matplotlib
 from copulae import GumbelCopula
 
 from conditioning_methods import ConditioningMethod
-from data import jodhpur_coords, bikaner_coords
+from data import jodhpur_coords, bikaner_coords, get_ghcn_daily_india_annualmax
 from pykelihood.distributions import GEV
 from pykelihood.kernels import linear
 from pykelihood.parameters import ConstantParameter
@@ -28,8 +28,6 @@ if TYPE_CHECKING:
     pass
 
 warnings.filterwarnings('ignore')
-
-path_to_directory = os.getenv("INDIA_DATA")
 stations = pd.read_table(f"{path_to_directory}/ghcnd-stations.txt", sep='\s+', usecols=[0, 1, 2, 3, 4, 5], header=None, names=['STATION', 'LATITUDE', 'LONGITUDE', 'ELEVATION', 'STATE', 'NAME'])
 stations = stations[((stations.LATITUDE == bikaner_coords[0]) & (stations.LONGITUDE == bikaner_coords[-1]))
                     | ((stations.LATITUDE == jodhpur_coords[0]) & (stations.LONGITUDE == jodhpur_coords[-1]))]
@@ -167,7 +165,7 @@ def plot_loc_vs_anomaly(y, profile):
     return fig
 
 
-def plot_return_levels(x, y, level, ex_trigger=False):
+def plot_return_levels(x, y, level, ex_trigger=False, condition=False):
     logrange = np.logspace(np.log10(1 + 1e-2), np.log10(10000), 100)
     first_year = 1973
     last_year = np.unique(y._get_label_or_level_values('YEAR'))[-1]
@@ -185,11 +183,26 @@ def plot_return_levels(x, y, level, ex_trigger=False):
         rls = []
         for k in logrange:
             fit = GEV_reparametrized_loc.fit(y, r=linear(x), x0=(y.mean(), 0., y.std(), 0.))
-            p = Profiler(fit, y, inference_confidence=0.95)
+            if condition:
+                historical_sample_size = len([i for i in y.index if i <= 2010])
+                sr = StoppingRule(data=y, k=30, distribution=fit, func=StoppingRule.fixed_to_1981_2010_average,
+                                  historical_sample_size=historical_sample_size)
+                thresh, N = sr.c, sr.N
+                len_extreme_event = 1
+                p = Profiler(distribution=fit, data=y, inference_confidence=0.95,
+                             score_function=partial(ConditioningMethod.full_conditioning_including_extreme,
+                                                    historical_sample_size=historical_sample_size,
+                                                    length_extreme_event=len_extreme_event,
+                                                    threshold=thresh),
+                             name='Conditioning including extreme event')
+                fit_p = p.optimum[0]
+            else:
+                p = Profiler(fit, y, inference_confidence=0.95)
+                fit_p = fit
             rls.append(fit.isf(1 / k)[idx])
             print(f'Computing CI for k={k}')
             cis.append(p.confidence_interval(lambda x: x.isf(1 / k)[idx]))
-        phalodi_level = 1 / fit.sf(level)[idx]
+        phalodi_level = 1 / fit_p.sf(level)[idx]
         levs.append(phalodi_level)
         lbs = [lb for (lb, ub) in cis]
         ubs = [ub for (lb, ub) in cis]
@@ -206,11 +219,11 @@ def plot_return_levels(x, y, level, ex_trigger=False):
         ax.plot(logrange[25:], ubs[25:], color=color, linewidth=0.6, linestyle='--')
         real_rt = 1 / (1 - np.arange(0, n) / n)
         if i == 0:
-            scaled_y = sorted_y - (fit.r().loc[idx_y] - fit.flattened_param_dict['r_a'].value)
+            scaled_y = sorted_y - (fit_p.r().loc[idx_y] - fit_p.flattened_param_dict['r_a'].value)
         else:
             scaled_y = sorted_y
         ax.scatter(real_rt, scaled_y, s=10, marker='x', color=color)
-    ax.annotate(f'RR={np.round(levs[0] / levs[-1], 1)}', xy=(logrange[0] + 1, 43),
+    ax.annotate(f'RR={np.round(levs[0] / levs[-1], 3)}', xy=(logrange[0] + 1, 43),
                 xytext=(-3, 0), textcoords="offset points",
                 horizontalalignment="left",
                 verticalalignment="bottom", color='goldenrod')
@@ -572,3 +585,5 @@ def plot_joint_pdf(joint, margs, ax=None, ticks_nbr=25):
     ax.set_title('a) Joint density contour')
     plt.colorbar(cs, ticks=[0.01, 0.1, 1, 10, 100], ax=ax, location='left', shrink=0.7)
     return ax
+
+

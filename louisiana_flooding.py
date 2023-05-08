@@ -83,7 +83,7 @@ class StoppingRuleLouisiana(object):
         return return_level_estimates, N
 
     @staticmethod
-    def fixed_to_k(covariate: pd.Series, data: pd.Series, historical_sample_size: int, k: int, n: int = 1):
+    def fixed_to_k(y, covariate: pd.Series, data: pd.Series, historical_sample_size: int, k: int, n: int = 1):
         historical_sample_yearsize = historical_sample_size
         year = np.unique(y._get_label_or_level_values('YEAR'))[historical_sample_yearsize - 1]
         data_stopped = data.loc[:year]
@@ -96,7 +96,7 @@ class StoppingRuleLouisiana(object):
         return return_level_estimates, N
 
     @staticmethod
-    def variable_in_the_historical_annualmax(covariate: pd.Series, data: pd.Series, historical_sample_size: int, k: int, n: int = 1):
+    def variable_in_the_historical_annualmax(y, covariate: pd.Series, data: pd.Series, historical_sample_size: int, k: int, n: int = 1):
         factor = 3.
         historical_sample_yearsize = historical_sample_size
         year = np.unique(y._get_label_or_level_values('YEAR'))[historical_sample_yearsize - 1]
@@ -269,7 +269,7 @@ def plot_return_levels(x, y, profile):
     return fig
 
 
-def segment_plot(profiles, year):
+def segment_plot(x, profiles, year):
     idx = x.reset_index()[x.reset_index()['YEAR'] == year].index[0]
     fig, ax = plt.subplots(figsize=(15, 5), constrained_layout=True)
     logrange = np.linspace(150, 2000, 10).astype(int)
@@ -294,7 +294,7 @@ def segment_plot(profiles, year):
     return fig
 
 
-def rl_plot_mutiprofile(profiles, year):
+def rl_plot_mutiprofile(x, profiles, year):
     idx = x.reset_index()[x.reset_index()['YEAR'] == year].index[0]
     fig, ax = plt.subplots(figsize=(7, 5), constrained_layout=True)
     logrange = np.logspace(np.log10(1 + 1e-4), np.log10(10000), 100)

@@ -11,7 +11,8 @@ lats = [29, 31]
 lons = [-95, -85]
 bikaner_coords = [28., 73.3]
 jodhpur_coords = [26.3, 73.017]
-
+seattle = [47.4444, -122.3139]
+portland = [45.5908, -122.6003]
 
 def download_cpc_us_precip(years: Sequence):
     path_to_directory = os.getenv("LOUISIANA_DATA") + '/gridded/'
@@ -79,6 +80,30 @@ def download_ghcn_daily_india(years: Sequence):
         else:
             print(f"Year {year} has already been downloaded to {path_to_directory}")
 
+def download_ghcn_daily_portland_seattle(years: Sequence):
+    path_to_directory = os.getenv("CANADA_DATA")
+    stations = pd.read_table(f"{path_to_directory}/ghcnd-stations.txt", sep='\s+', usecols=[0, 1, 2, 3, 4, 5], header=None,
+                             names=['STATION', 'LATITUDE', 'LONGITUDE', 'ELEVATION', 'STATE', 'NAME'])
+    stations = stations[((stations.LATITUDE == seattle[0]) & (stations.LONGITUDE == seattle[-1]))
+                        | ((stations.LATITUDE == portland[0]) & (stations.LONGITUDE == portland[-1]))]
+    for year in np.arange(*years, step=1):
+        target_url = f"https://www.ncei.noaa.gov/pub/data/ghcn/daily/by_year/{year}.csv.gz"
+        if not os.path.isfile(f"{path_to_directory}/{year}.csv.gz"):
+            try:
+                print(f"Downloading url {target_url} to file {path_to_directory}")
+                wget.download(target_url, path_to_directory)
+                data = pd.read_csv(f"{path_to_directory}/{year}.csv.gz", compression='gzip', header=None, names=["STATION", "DATE", "ELEMENT", "VALUE", "M-FLAG", "Q-FLAG", "S-FLAG", "TIME"])
+                data = data[(data['ELEMENT'].isin(['TMAX']))].rename(columns={'VALUE': 'TMAX'}).merge(stations, on='STATION').drop(columns=['ELEMENT'])
+                data = data.assign(DATE=pd.to_datetime(data.DATE.astype(str)))
+                data = data[data['Q-FLAG'].isna()].assign(YEAR=data.DATE.dt.year).assign(MONTH=data.DATE.dt.month)
+                data = data.set_index(['STATION', 'DATE', 'YEAR'])[['TMAX', 'TIME', 'STATE', 'NAME', 'LATITUDE', 'LONGITUDE', 'ELEVATION']]
+                if len(data):
+                    data.to_csv(f"{path_to_directory}/{year}.csv")
+            except Exception as err:
+                print(f"---> Can't access {target_url}: {err}")
+        else:
+            print(f"Year {year} has already been downloaded to {path_to_directory}")
+
 
 def get_ghcn_daily_us_annualmax():
     path_to_directory = os.getenv('LOUISIANA_DATA') + '/obs'
@@ -113,10 +138,21 @@ def get_cpc_us_precip_annualmax_maps():
     annual_maxima = threedays_mean_prec.resample(time='1Y').max()
     return annual_maxima
 
+def get_ghcn_daily_canada_annualmax():
+    path_to_directory = os.getenv('CANADA_DATA')
+    csvs = [pd.read_csv(f) for f in glob(f"{path_to_directory}/*.csv")]
+    csvs = [csv.assign(YEAR=pd.to_datetime(csv.DATE).dt.year).set_index(['STATION', 'DATE', 'YEAR']).assign(TMAX=lambda x: x['TMAX'] / 10) for csv in csvs]
+    concatenated = pd.concat(csvs)
+    station_series = concatenated.sort_values('DATE')['TMAX'].unstack('STATION')
+    annual_max = station_series.groupby(level='YEAR').agg('max')
+    global_mean_temp = process_global_mean_surfacetemp_for_obs_analysis()
+    full_dataset = annual_max.merge(global_mean_temp, left_index=True, right_index=True)
+    return full_dataset
 
 def process_global_mean_surfacetemp_for_obs_analysis():
-    global_mean_temp = pd.read_csv(os.getenv("LOUISIANA_DATA") + '/GLB.Ts+dSST.csv', header=1)[['Year', 'J-D']].iloc[1:-1].rename(
+    global_mean_temp = pd.read_csv(os.getenv("LOUISIANA_DATA") + '/GLB.Ts+dSST.csv', header=1)[['Year', 'J-D']].rename(
         columns={'J-D': 'TEMPANOMALY_GLOB', 'Year': 'YEAR'})
+    global_mean_temp.YEAR = global_mean_temp.YEAR.astype(int)
     global_mean_temp.TEMPANOMALY_GLOB = global_mean_temp.TEMPANOMALY_GLOB.astype(float)
     global_mean_temp.YEAR = pd.to_datetime(global_mean_temp.YEAR.astype(str))
     global_mean_temp = global_mean_temp.set_index('YEAR').rolling('1461D').mean()

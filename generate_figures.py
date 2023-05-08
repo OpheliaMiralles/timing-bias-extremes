@@ -1,10 +1,11 @@
 import os
+import pathlib
 
 import cv2
 import matplotlib
 
 import threshold_selection
-from data import get_ghcn_daily_india_annualmax
+from data import get_ghcn_daily_india_annualmax, get_ghcn_daily_canada_annualmax
 from india_heatwave import plot_loc_vs_anomaly, plot_return_levels, compute_timevarying_profile_pairs, fig_std_cond_comparison, compute_alternative_profiles, segment_plot, \
     fit_gev_Tx_without_trend, compute_timevarying_profile_pairs_using_bivariate_distribution, fig_std_cond_comparison_biv, plot_joint_distribution, fit_gev_Tx_with_trend
 from pykelihood.profiler import Profiler
@@ -45,17 +46,17 @@ def fig_univ_fixed_sr():
         df.plot(ax=ax, color=['salmon', 'pink', 'navy', 'royalblue'], marker='x')
         ax.grid()
         if sheet_name == 'CIC':
-            ax.set_ylim(0.8, None)
+            ax.set_ylim(0.5, None)
         ax.set_title(f"{letter}) {sheet_name.replace('RelBias', 'RELATIVE BIAS').replace('UPC', 'Upper Coverage Error').replace('LPC', 'Lower Coverage Error')}")
         ax.set_xscale('log')
         ax.set_xlabel(r'$\tau$')
         ax.legend()
-    fig.savefig(f'{PLOT_PATH}/univ_fixed_sr.png', DPI=200)
     fig.show()
+    fig.savefig(f'{PLOT_PATH}/univ_fixed_sr.png', DPI=200)
 
 
-def fig_univ_cond_fixed_sr():
-    p = f'{SIM_PATH}/1000_iter_conditioned_sample225_nh100_reparam.xlsx'
+def fig_univ_cond_fixed_sr(xi=None):
+    p = f'{SIM_PATH}/500_iter_conditioned_sample225_nh100_{xi}xi.xlsx' if xi else f'{SIM_PATH}/1000_iter_conditioned_sample225_nh100_reparam.xlsx'
     coldic = {'Unnamed: 0': 'Return level', 'Excluding Extreme': 'Excluding Trigger',
               'Cond. Including Extreme': 'Cond. Including Trigger', 'Cond. Excluding Extreme': 'Cond. Excluding Trigger'}
     for particularity in [None, '_nostandard']:
@@ -82,7 +83,8 @@ def fig_univ_cond_fixed_sr():
             ax.set_xlabel(r'$\tau$')
             ax.legend()
         fig.show()
-        fig.savefig(f'{PLOT_PATH}/univ_cond_fixed_sr{particularity}.png', DPI=200)
+        textxi = xi if xi else ''
+        fig.savefig(f'{PLOT_PATH}/univ_cond_fixed_sr{particularity}{textxi}.png', DPI=200)
 
 
 def fig_biv_fixed_sr():
@@ -323,23 +325,35 @@ def fig_loc_rl_std():
     level = y.loc[2016]
     x = pd.Series((y.index - y.index.min()) / (y.index.max() - y.index.min()), index=y.index).rename('time')
     fit_non_reparam = fit_gev_Tx_with_trend(x, y)
-    standard_profile_non_reparam = Profiler(distribution=fit_non_reparam, data=y, inference_confidence=0.95)
+    standard_profile_non_reparam = Profiler(distribution=fit_non_reparam,
+                                            data=y, inference_confidence=0.95)
     print('Plotting loc vs anomaly')
-    fig1 = plot_loc_vs_anomaly(y, standard_profile_non_reparam)
+    p = pathlib.Path(PLOT_PATH) / "loc_jod.png"
+    if not p.is_file():
+        fig1 = plot_loc_vs_anomaly(y, standard_profile_non_reparam)
+        fig1.savefig(str(p), DPI=200)
     print('Computing and plotting return levels for Jodhpur')
-    fig2 = plot_return_levels(x, y, level)
-    fig1.savefig(f"{PLOT_PATH}/loc_jod.png", DPI=200)
-    fig2.savefig(f"{PLOT_PATH}/rl_jod.png", DPI=200)
+    p = pathlib.Path(PLOT_PATH) / "rl_jod.png"
+    if not p.is_file():
+        fig2 = plot_return_levels(x, y, level)
+        fig2.savefig(str(p), DPI=200)
+    p = pathlib.Path(PLOT_PATH) / "rl_jod_cond.png"
+    if not p.is_file():
+        fig3 = plot_return_levels(x, y, level, condition=True)
+        fig3.savefig(str(p), DPI=200)
     im1 = cv2.imread(f"{PLOT_PATH}/loc_jod.png", )
     im2 = cv2.imread(f"{PLOT_PATH}/rl_jod.png")
+    im3 = cv2.imread(f"{PLOT_PATH}/rl_jod_cond.png")
     im1 = cv2.cvtColor(im1, cv2.COLOR_BGR2RGB)
     im2 = cv2.cvtColor(im2, cv2.COLOR_BGR2RGB)
-    fig, (ax1, ax2) = plt.subplots(ncols=2, constrained_layout=True, figsize=(14, 5))
-    for ax, im in zip((ax1, ax2), [im1, im2]):
+    im3 = cv2.cvtColor(im3, cv2.COLOR_BGR2RGB)
+    fig, (ax1, ax2, ax3) = plt.subplots(ncols=3, constrained_layout=True, figsize=(21, 5))
+    for ax, im in zip((ax1, ax2, ax3), [im1, im2, im3]):
         ax.imshow(im)
         ax.axis('off')
     ax1.set_title('a) Estimated location parameter')
     ax2.set_title('b) Estimated return levels')
+    ax3.set_title('c) Estimated return levels using COND')
     fig.show()
     fig.savefig(f"{PLOT_PATH}/jod_rlsloc_std.png", DPI=200)
 
@@ -390,10 +404,44 @@ def fig_stdcond_comparison_bik():
     fig.show()
     fig.savefig(f"{PLOT_PATH}/bikaner_rls_comp.png", DPI=200)
 
+# Heat dome canada example
+temp_annualmax_canada = get_ghcn_daily_canada_annualmax()
+
+def fig_loc_rl_std_canada():
+    s = temp_annualmax.columns[-1]
+    y = temp_annualmax[s].dropna().loc[:2021]
+    level = y.loc[2016]
+    x = temp_annualmax_canada['TEMPANOMALY_GLOB'].loc[y.index]
+    fit_non_reparam = fit_gev_Tx_with_trend(x, y)
+    standard_profile_non_reparam = Profiler(distribution=fit_non_reparam, data=y, inference_confidence=0.95)
+    print('Plotting loc vs anomaly')
+    p = pathlib.Path(PLOT_PATH) /'canada'/ "USW00024229_loc.png"
+    if not p.is_file():
+        fig1 = plot_loc_vs_anomaly(y, standard_profile_non_reparam)
+        fig1.savefig(str(p), DPI=200)
+    print('Computing and plotting return levels for Portland')
+    p = pathlib.Path(PLOT_PATH) /'canada'/ "USW00024229_rls.png"
+    if not p.is_file():
+        fig2 = plot_return_levels(x, y, level)
+        fig2.savefig(str(p), DPI=200)
+    im1 = cv2.imread(f"{PLOT_PATH}canada/USW00024229_loc.png")
+    im2 = cv2.imread(f"{PLOT_PATH}canada/USW00024229_rls.png")
+    im1 = cv2.cvtColor(im1, cv2.COLOR_BGR2RGB)
+    im2 = cv2.cvtColor(im2, cv2.COLOR_BGR2RGB)
+    fig, (ax1, ax2) = plt.subplots(ncols=2, constrained_layout=True, figsize=(14, 5))
+    for ax, im in zip((ax1, ax2), [im1, im2]):
+        ax.imshow(im)
+        ax.axis('off')
+    ax1.set_title('a) Estimated location parameter')
+    ax2.set_title('b) Estimated return levels')
+    fig.show()
+    fig.savefig(f"{PLOT_PATH}/portland_rlsloc_std.png", DPI=200)
+
+
 
 def plot_sim():
     fig_univ_fixed_sr()
-    fig_univ_cond_fixed_sr()
+    fig_univ_cond_fixed_sr(xi='null')
     fig_biv_fixed_sr()
 
 
@@ -401,7 +449,7 @@ def plot_india():
     fig_biv_distribution()
     fig_loc_rl_std()
     fig_stdcond_comparison_jod()
-    segmentplot_jod()
+    fig_loc_rl_std()
     fig_stdcond_comparison_bik()
 
 
@@ -410,3 +458,7 @@ def plot_vargas():
     fig_rl_gpd()
     fig_segments_gev()
     fig_segments_gpd()
+
+
+def plot_canada():
+    fig_loc_rl_std_canada()
