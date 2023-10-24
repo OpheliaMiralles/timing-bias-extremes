@@ -3,15 +3,18 @@ from functools import partial
 
 import matplotlib
 from copulae import GumbelCopula
+from scipy.stats import genextreme
 
+import data
 from conditioning_methods import ConditioningMethod
-from data import jodhpur_coords, bikaner_coords, get_ghcn_daily_india_annualmax
+from data import jodhpur_coords, bikaner_coords
 from pykelihood.distributions import GEV
 from pykelihood.kernels import linear
 from pykelihood.parameters import ConstantParameter
 from pykelihood.profiler import Profiler
-from pykelihood_distributions import GEV_reparametrized_loc, GEV_reparametrized
+from pykelihood_distributions import GEV_reparametrized_loc
 from timing_bias import StoppingRule
+from utils import bootstrap_confidence_interval, parametric_confidence_interval
 
 matplotlib.rcParams['text.usetex'] = True
 
@@ -47,20 +50,12 @@ def fit_gev_Tx_with_trend(x, y, rl=None):
 
 def fit_gev_Tx_without_trend(y, rl=None):
     reparam = True if rl is not None else False
-    if y.name == 'IN019180500':
-        gev = GEV.fit(y, x0=(y.mean(), y.std(), 0.))
-        if reparam and (rl is not None):
-            r = gev.isf(1 / rl)
-            return GEV_reparametrized(p=1 / rl, shape=gev.shape(), loc=gev.loc(), r=r).fit_instance(y)
-        else:
-            return gev
+    gev = GEV.fit(y, x0=(y.mean(), y.std(), 0.))
+    if reparam and (rl is not None):
+        r = gev.isf(1 / rl)
+        return GEV_reparametrized_loc(p=1 / rl, shape=gev.shape(), scale=gev.scale(), r=r).fit_instance(y)
     else:
-        gev = GEV.fit(y, x0=(y.mean(), y.std(), 0.))
-        if reparam and (rl is not None):
-            r = gev.isf(1 / rl)
-            return GEV_reparametrized_loc(p=1 / rl, shape=gev.shape(), scale=gev.scale(), r=r).fit_instance(y)
-        else:
-            return gev
+        return gev
 
 
 def compute_alternative_profiles(fit, y, x=None, trend=False, infconf=0.95, return_period=100):
@@ -128,112 +123,78 @@ def compute_timevarying_profile_pairs(year, y, infconf=0.95, return_period=100):
     return [std_prof, cond]
 
 
-def plot_loc_vs_anomaly(y, profile):
-    opt = profile.optimum[0]
+def plot_loc_and_rl_phalodi(y, ci_type='parametric'):
+    logrange = np.logspace(np.log10(1 + 1e-2), np.log10(1000000), 50)
+    level = 48.8
+    name = 'Phalodi'
+    y.index = pd.to_datetime(y.index).year
     first_year = np.unique(y._get_label_or_level_values('YEAR'))[0]
     last_year = np.unique(y._get_label_or_level_values('YEAR'))[-1]
     years = np.arange(first_year, last_year + 1, 1)
-    scaled_years = ((years - y.index.min()) / (y.index.max() - y.index.min()))
-    x = pd.Series(scaled_years, index=years)
-    locs = [opt.loc.with_covariate(np.array([i]))()[0] for i in x]
-    scales = [opt.scale()] * len(locs)
-    loc_scale = [loc + scale for (loc, scale) in zip(locs, scales)]
-    loc_2scale = [loc + 2 * scale for (loc, scale) in zip(locs, scales)]
-    df = pd.DataFrame([x.values, locs, loc_scale, loc_2scale],
-                      columns=x.index,
-                      index=['time', 'loc_par', 'loc_plus_sigma', 'loc_plus_2sigma']) \
-        .T
-    fig, ax = plt.subplots(figsize=(7, 5), constrained_layout=True)
-    ax.scatter(y.index, y, s=16, marker='x', color='black')
-    ax.set_xlim(int(y.index.min() / 10) * 10, 2020)
-    ax.set_ylim(43, 51)
-    ax.set_xlabel('time (years)')
-    ax.set_ylabel('daily max temperature ($^\circ$C)')
-    ax.plot(df.index, df.loc_par, color='red')
-    ax.plot(df.index, df.loc_plus_sigma, linewidth=0.2, color='red')
-    ax.plot(df.index, df.loc_plus_2sigma, linewidth=0.2, color='red')
-    for year, i in zip([1973, last_year], [0, -1]):
-        if 'xcluding' in profile.name and year == 2016:
-            year_dis = year - 1
-            i = i - 1
-        else:
-            year_dis = year
-        idx_y = [i for i in y.index if int(i / 10) * 10 == int(year / 10) * 10][i]
-        metric = lambda x: x.loc().loc[idx_y]
-        ci = profile.confidence_interval(metric)
-        ax.vlines(year_dis, ci[0], ci[-1], color='red')
-    return fig
-
-
-def plot_return_levels(x, y, level, ex_trigger=False, condition=False):
-    logrange = np.logspace(np.log10(1 + 1e-2), np.log10(10000), 100)
-    first_year = 1973
-    last_year = np.unique(y._get_label_or_level_values('YEAR'))[-1]
+    scaled_ind_y = pd.Series(((y.index - y.index.min()) / (y.index.max() - y.index.min())), index=y.index)
+    gev_fit = fit_gev_Tx_with_trend(scaled_ind_y, y)
+    y_ref = y - gev_fit.loc() + gev_fit.loc().loc[first_year]
+    y_now = y - gev_fit.loc() + gev_fit.loc().iloc[-1]
+    gev_past = GEV(loc=gev_fit.loc().loc[first_year], scale=gev_fit.scale(), shape=gev_fit.shape())
+    gev_now = GEV(loc=gev_fit.loc().iloc[-1], scale=gev_fit.scale(), shape=gev_fit.shape())
+    loc_ci_past = Profiler(gev_past, y_ref, inference_confidence=0.95).confidence_interval_bs('loc')
+    loc_ci_now = Profiler(gev_now, y_now, inference_confidence=0.95).confidence_interval_bs('loc')
+    # now we consider the fit without trend, since it is not significant
+    # we rather distinguish between the inclusion or exclusion of the extreme event
+    ex_params = genextreme.fit(y.iloc[:-1].dropna())
+    exfit = genextreme(*ex_params)
+    theo_ex = exfit.ppf(1 - 1 / logrange)
+    std_params = genextreme.fit(y.dropna())
+    stdfit = genextreme(*std_params)
+    theo_std = stdfit.ppf(1 - 1 / logrange)
+    if ci_type == 'bootstrap':
+        lower_std, upper_std = bootstrap_confidence_interval(y, metric=lambda x: x.ppf(1 - 1 / logrange))
+        lower_ex, upper_ex = bootstrap_confidence_interval(y.iloc[:-1], metric=lambda x: x.ppf(1 - 1 / logrange))
+    elif ci_type == "parametric":
+        lower_std, upper_std = parametric_confidence_interval(GEV_reparametrized_loc(), y=y, range_x=1 / logrange,
+                                                              string_metric='p',
+                                                              x0=np.array([[r, std_params[2], -std_params[0]] for r in
+                                                                           theo_std]))
+        lower_ex, upper_ex = parametric_confidence_interval(GEV_reparametrized_loc(), y=y.iloc[:-1],
+                                                            range_x=1 / logrange,
+                                                            string_metric='p',
+                                                            x0=np.array(
+                                                                [[r, ex_params[2], -ex_params[0]] for r in theo_ex]))
+    else:
+        raise ValueError("ci_type must be either bootstrap or parametric")
+    # plot
+    l1, l2 = ('a', "b")
+    fig, (ax1, ax2) = plt.subplots(nrows=2, figsize=(12, 8))
+    gev_fit.loc().plot(ax=ax1, color="r", label="GEV location parameter")
+    (gev_fit.loc() + gev_fit.scale()).plot(ax=ax1, color="r", linewidth=0.8)
+    (gev_fit.loc() + 2 * gev_fit.scale()).plot(ax=ax1, color="r", linewidth=0.8)
+    ax1.vlines(first_year, *loc_ci_past, color="r")
+    ax1.vlines(last_year, *loc_ci_now, color="r")
+    ax1.scatter(y.index, y, marker='x', color="k", s=10)
+    ax1.set_title(f"{l1}) TXx {name} 1944-2016")
+    ax1.set_xlabel('year')
+    for ax in (ax1, ax2):
+        ax.set_ylabel('TXx ($^\circ$C)')
     sorted_y = y.sort_values()
     n = sorted_y.size
-    fig, ax = plt.subplots(figsize=(7, 5), constrained_layout=True)
-    levs = []
-    for color, year, i in zip(['royalblue', 'red'], [first_year, last_year], [0, -1]):
-        name = f'GEV shift fit {year}'
-        cis = []
-        if ex_trigger and year == 2016:
-            i = i - 1
-        idx_y = [i for i in y.index if int(i / 10) * 10 == int(year / 10) * 10][i]
-        idx = y.reset_index()[y.reset_index()['YEAR'] == idx_y].index[0]
-        rls = []
-        for k in logrange:
-            fit = GEV_reparametrized_loc.fit(y, r=linear(x), x0=(y.mean(), 0., y.std(), 0.))
-            if condition:
-                historical_sample_size = len([i for i in y.index if i <= 2010])
-                sr = StoppingRule(data=y, k=30, distribution=fit, func=StoppingRule.fixed_to_1981_2010_average,
-                                  historical_sample_size=historical_sample_size)
-                thresh, N = sr.c, sr.N
-                len_extreme_event = 1
-                p = Profiler(distribution=fit, data=y, inference_confidence=0.95,
-                             score_function=partial(ConditioningMethod.full_conditioning_including_extreme,
-                                                    historical_sample_size=historical_sample_size,
-                                                    length_extreme_event=len_extreme_event,
-                                                    threshold=thresh),
-                             name='Conditioning including extreme event')
-                fit_p = p.optimum[0]
-            else:
-                p = Profiler(fit, y, inference_confidence=0.95)
-                fit_p = fit
-            rls.append(fit.isf(1 / k)[idx])
-            print(f'Computing CI for k={k}')
-            cis.append(p.confidence_interval(lambda x: x.isf(1 / k)[idx]))
-        phalodi_level = 1 / fit_p.sf(level)[idx]
-        levs.append(phalodi_level)
-        lbs = [lb for (lb, ub) in cis]
-        ubs = [ub for (lb, ub) in cis]
-        try:
-            ax.vlines(phalodi_level, 0, level, color=color, linewidth=0.6, linestyle='--')
-            ax.annotate(int(phalodi_level), xy=(phalodi_level, 43),
-                        xytext=(-3, 0), textcoords="offset points",
-                        horizontalalignment="right",
-                        verticalalignment="bottom", color=color)
-        except:
-            pass
-        ax.plot(logrange, rls, color=color, label=name, linewidth=0.6)
-        ax.plot(logrange[25:], lbs[25:], color=color, linewidth=0.6, linestyle='--')
-        ax.plot(logrange[25:], ubs[25:], color=color, linewidth=0.6, linestyle='--')
-        real_rt = 1 / (1 - np.arange(0, n) / n)
-        if i == 0:
-            scaled_y = sorted_y - (fit_p.r().loc[idx_y] - fit_p.flattened_param_dict['r_a'].value)
-        else:
-            scaled_y = sorted_y
-        ax.scatter(real_rt, scaled_y, s=10, marker='x', color=color)
-    ax.annotate(f'RR={np.round(levs[0] / levs[-1], 3)}', xy=(logrange[0] + 1, 43),
-                xytext=(-3, 0), textcoords="offset points",
-                horizontalalignment="left",
-                verticalalignment="bottom", color='goldenrod')
-    ax.hlines(level, logrange[0], logrange[-1], color='goldenrod', linewidth=0.6, label='Observed 2016')
-    ax.set_xlabel('return period (years)')
-    ax.legend(loc='upper left')
-    ax.set_ylabel('daily max temperature ($^\circ$C)')
-    ax.set_xscale('log')
-    ax.set_xlim(logrange[0], logrange[-1])
-    ax.set_ylim(43, 51)
+    real_rt = 1 / (1 - np.arange(0, n) / n)
+    ax2.set_title(f"{l2}) Estimated return levels in {name}")
+    ax2.scatter(real_rt, sorted_y, s=10, marker='x', color='k')
+    ax2.plot(logrange, theo_ex, color="royalblue", label="Excluding")
+    ax2.plot(lower_ex, color="royalblue", ls='-.')
+    ax2.plot(upper_ex, color="royalblue", ls='-.')
+    ax2.plot(logrange, theo_std, color="r", label='Including')
+    ax2.plot(lower_std, color="r", ls='-.')
+    ax2.plot(upper_std, color="r", ls='-.')
+    ax2.set_xlim(logrange[0], logrange[-1])
+    ax2.hlines(level, ax2.get_xlim()[0], ax2.get_xlim()[-1], color='goldenrod', linewidth=0.6, label='Phalodi 2016')
+    ax2.hlines(stdfit.ppf(1), ax2.get_xlim()[0], ax2.get_xlim()[-1], color='r', linewidth=0.6, ls="-.")
+    ax2.hlines(exfit.ppf(1), ax2.get_xlim()[0], ax2.get_xlim()[-1], color='royalblue', linewidth=0.6, ls="-.")
+    ax2.set_xlabel('return period (years)')
+    ax2.legend(loc='upper left')
+    ax2.set_xscale('log')
+    ax2.set_ylim(43, 53)
+    fig.show()
     return fig
 
 
@@ -258,35 +219,6 @@ def segment_plot(profile_dic, y, state):
     ax.legend(loc='upper left')
     ax.set_ylabel('daily max temperature ($^\circ$C)')
     fig.suptitle(f'TXx {state} May-June {y.index.min()}-{y.index.max()} ({int(100 * infconf)}\% CI)')
-    return fig
-
-
-def rl_plot_mutiprofile(profiles, y, state, level):
-    fig, ax = plt.subplots(figsize=(7, 5), constrained_layout=True)
-    logrange = np.logspace(np.log10(1 + 1e-4), np.log10(10000), 100)
-    sorted_y = y.sort_values()
-    n = sorted_y.size
-    for profile, color in zip(profiles,
-                              ['salmon', 'pink', 'navy', 'royalblue']):
-        rls = [profile.optimum[0].isf(1 / k) for k in logrange]
-        ax.plot(logrange, rls, color=color, label=profile.name)
-        cis = []
-        for k in logrange:
-            metric = lambda x: x.isf(1 / k)
-            cis.append(profile.confidence_interval(metric))
-        lbs = [lb for (lb, ub) in cis]
-        ubs = [ub for (lb, ub) in cis]
-        ax.fill_between(logrange, lbs, ubs, color=color, label=profile.name, alpha=0.2)
-    real_rt = 1 / (1 - np.arange(0, n) / n)
-    ax.scatter(real_rt, sorted_y, s=10, marker='x', color='black', label='Observed RLs')
-    ax.hlines(level, logrange[0], logrange[-1], color='goldenrod', linewidth=0.6, label='Observed 2016')
-    ax.set_xlabel('Return period (year)')
-    ax.legend(loc='best')
-    ax.set_ylabel('daily max temperature ($^\circ$C)')
-    ax.set_xscale('log')
-    ax.set_xlim(logrange[0], logrange[-1])
-    ax.set_ylim(43, 51)
-    fig.suptitle(f'TXx {state} May-June {y.index.min()}-{y.index.max()} (95\% CI)')
     return fig
 
 
@@ -343,7 +275,7 @@ def fig_std_cond_comparison(dic, state, level):
     return fig
 
 
-# Bivarate
+# Bivariate
 def cdf_levels(u2, l, theta):
     a = np.log(1 / l) ** theta
     b = np.log(1 / u2) ** theta
@@ -587,3 +519,11 @@ def plot_joint_pdf(joint, margs, ax=None, ticks_nbr=25):
     return ax
 
 
+if __name__ == '__main__':
+    data = data.get_ghcn_daily_india_annualmax()
+    series = data
+    series.index = pd.to_datetime(series.index, format='%Y')
+    series = series.loc[:pd.to_datetime(2016, format='%Y')]
+    s = series.columns[1]
+    y = series[s].dropna()
+    plot_loc_and_rl_phalodi(y)
