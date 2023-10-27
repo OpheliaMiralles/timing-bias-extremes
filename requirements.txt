@@ -1,1 +1,1 @@
-git+https://github.com/OpheliaMiralles/pykelihood.git@08bf0ad93d130c3d59feaaa53d7630994ea4991d
+pykelihood==0.4.1
