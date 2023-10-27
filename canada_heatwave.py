@@ -5,7 +5,6 @@ import matplotlib
 import pykelihood.distributions
 from pykelihood.distributions import GEV
 from pykelihood.kernels import linear
-from pykelihood.parameters import ConstantParameter
 from pykelihood.profiler import Profiler
 
 import data
