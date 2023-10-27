@@ -2,21 +2,21 @@ import os
 from functools import partial
 
 import matplotlib
-
-import data
 import pykelihood.distributions
-from conditioning_methods import ConditioningMethod
-from data import portland, seattle
 from pykelihood.distributions import GEV
 from pykelihood.kernels import linear
 from pykelihood.parameters import ConstantParameter
 from pykelihood.profiler import Profiler
+
+import data
+from conditioning_methods import ConditioningMethod
+from data import portland, seattle
 from pykelihood_distributions import GEV_reparametrized_loc, GEV_reparametrized_p
 from timing_bias import StoppingRule
 from utils import parametric_confidence_interval, bootstrap_confidence_interval
 
 matplotlib.rcParams['text.usetex'] = True
-path_to_directory = os.getenv("CANADA_DATA")
+path_to_directory = os.getenv("CANADA_DATA") or "./data"
 import matplotlib.pyplot as plt
 
 import warnings
@@ -31,7 +31,8 @@ if TYPE_CHECKING:
 warnings.filterwarnings('ignore')
 optim = 'BFGS'
 
-stations = pd.read_table(f"{path_to_directory}/ghcnd-stations.txt", sep='\s+', usecols=[0, 1, 2, 3, 4, 5], header=None, names=['STATION', 'LATITUDE', 'LONGITUDE', 'ELEVATION', 'STATE', 'NAME'])
+stations = pd.read_table(f"{path_to_directory}/ghcnd-stations.txt", sep='\s+', usecols=[0, 1, 2, 3, 4, 5], header=None,
+                         names=['STATION', 'LATITUDE', 'LONGITUDE', 'ELEVATION', 'STATE', 'NAME'])
 stations = stations[((stations.LATITUDE == seattle[0]) & (stations.LONGITUDE == seattle[-1]))
                     | ((stations.LATITUDE == portland[0]) & (stations.LONGITUDE == portland[-1]))]
 
@@ -44,7 +45,8 @@ def fit_gev_Tx_with_trend(x, y, rl=None):
     if not reparam:
         return gev
     fit = GEV_reparametrized_loc(p=1 / rl, r=linear(x=x),
-                                 scale=gev.scale()).fit_instance(y, x0=(gev.isf(1 / rl).mean(), alpha_init, gev.scale(), gev.shape()))
+                                 scale=gev.scale()).fit_instance(y, x0=(
+        gev.isf(1 / rl).mean(), alpha_init, gev.scale(), gev.shape()))
     return fit
 
 
@@ -55,7 +57,8 @@ def fit_gev_Tx_with_trend_p(x, y, r=None):
     gev = GEV.fit(y, loc=linear(x=x), x0=[mu0_init, alpha_init, sigma_init, shape_init])
     if not reparam:
         return gev
-    fit = GEV_reparametrized_p(loc=gev.loc, p=0, shape=gev.shape(), r=r).fit_instance(y, x0=(mu0_init, alpha_init, gev.sf(r).mean(), gev.shape()))
+    fit = GEV_reparametrized_p(loc=gev.loc, p=0, shape=gev.shape(), r=r).fit_instance(y, x0=(
+        mu0_init, alpha_init, gev.sf(r).mean(), gev.shape()))
     return fit
 
 
@@ -69,28 +72,7 @@ def fit_gev_Tx_without_trend(y, rl=None):
         return gev
 
 
-def get_std_cond_profiles_for_year_and_event(x, y, event, year, including=True):
-    cov = x if including else x.loc[:2020]
-    tx = y if including else y.loc[:2020]
-    cm = ConditioningMethod.full_conditioning_including_extreme if including else ConditioningMethod.full_conditioning_excluding_extreme
-    fit = fit_gev_Tx_with_trend_p(cov, tx, r=event)
-    fit_year = GEV_reparametrized_p(loc=ConstantParameter(fit.loc(x).loc[year]), p=fit.p(), shape=fit.shape(), r=event).fit_instance(tx)
-    standard_profile = Profiler(distribution=fit_year, data=tx, inference_confidence=0.66, optimization_method=optim)
-    historical_sample_size = len([i for i in tx.index if i <= 2010])
-    sr = StoppingRule(data=tx, k=200, distribution=fit, func=StoppingRule.variable_in_the_estimated_rl_with_trend_in_loc,
-                      historical_sample_size=historical_sample_size)
-    thresh, N = sr.c, sr.N
-    len_extreme_event = 1
-    full = Profiler(distribution=fit_year, data=tx, inference_confidence=0.66, optimization_method=optim,
-                    score_function=partial(cm,
-                                           historical_sample_size=historical_sample_size,
-                                           length_extreme_event=len_extreme_event,
-                                           threshold=thresh),
-                    name='Conditioning including extreme event')
-    return standard_profile, full
-
-
-def plot_loc_vs_anomaly(x, y, ci_type='parametric'):
+def plot_loc_and_rl(x, y, ci_type='parametric'):
     level = 46.7
     logrange = np.logspace(np.log10(1 + 1e-2), np.log10(10000), 50)
     year_used_for_comparison = 1951
@@ -165,37 +147,62 @@ def plot_loc_vs_anomaly(x, y, ci_type='parametric'):
     return fig
 
 
+def get_std_cond_fits_for_year_and_event(x, y, year, event=41.7, including=True):
+    cov = x if including else x.loc[:2020]
+    tx = y if including else y.loc[:2020]
+    cm = ConditioningMethod.full_conditioning_including_extreme if including else ConditioningMethod.full_conditioning_excluding_extreme
+    gev_fit = fit_gev_Tx_with_trend_p(cov, tx, r=event)
+    location = gev_fit.loc(x).loc[year]
+    y_ref = tx - gev_fit.loc() + location
+    dist = GEV_reparametrized_p(
+        loc=location, p=gev_fit.p(), shape=gev_fit.shape(),
+        r=event)
+    # fit with Nelder-Mead first to get a decent start point for the fit with BFGS
+    gev_fit_year = dist.fit_instance(y_ref)
+    # shape should not change with optimization method
+    std_fit_year = gev_fit_year.fit_instance(y_ref, shape=gev_fit_year.shape(), scipy_args={"method": optim})
+    historical_sample_size = len([i for i in y.index if i <= 2010])
+    sr = StoppingRule(data=tx, k=event, distribution=gev_fit,
+                      func=StoppingRule.fixed_to_k,
+                      historical_sample_size=historical_sample_size)
+    thresh, N = sr.c, sr.N
+    len_extreme_event = 1
+    score = partial(cm,
+                    historical_sample_size=historical_sample_size,
+                    length_extreme_event=len_extreme_event,
+                    threshold=thresh)
+    cond_year = gev_fit_year.fit_instance(y_ref, score)
+    gev_fit_cond_year = cond_year.fit_instance(y_ref, score, shape=cond_year.shape(), scipy_args={"method": optim})
+    return std_fit_year, gev_fit_cond_year
+
+
+def get_CI_for_rr_from_hessian(y, p1, p0, hess1, hess0, conf=0.95):
+    hess_term1 = hess1[1, 1]
+    hess_term0 = hess0[1, 1]
+    var1 = hess_term1 / (len(y)) * 1 / p1 ** 2
+    var0 = hess_term0 / (len(y)) * 1 / p0 ** 2
+    total_var = var0 + var1
+    up = pykelihood.distributions.Normal().ppf(1 - conf / 2)
+    down = pykelihood.distributions.Normal().ppf(conf / 2)
+    log_lb = np.log(p1 / p0) + down * np.sqrt(total_var)
+    log_ub = np.log(p1 / p0) + up * np.sqrt(total_var)
+    return [np.exp(log_lb), np.exp(log_ub)]
+
+
 def get_risk_ratio_and_CI(x, y, event=41.7, year_past=1951, year_now=2021):
     dic = {}
-    std_prev, cond_prev = get_std_cond_profiles_for_year_and_event(x, y, event, year_now)
-    std_hist, cond_hist = get_std_cond_profiles_for_year_and_event(x, y, event, year_past)
-    ex_prev, condex_prev = get_std_cond_profiles_for_year_and_event(x, y, event, year_now, including=False)
-    ex_hist, condex_hist = get_std_cond_profiles_for_year_and_event(x, y, event, year_past, including=False)
-
-    def get_CI_for_rr_from_hessian(p1, p0, hess1, hess0, conf=0.95):
-        hess_term1 = hess1[0, 0]
-        hess_term0 = hess0[0, 0]
-        var1 = hess_term1 / (len(y)) * 1 / p1 ** 2
-        var0 = hess_term0 / (len(y)) * 1 / p0 ** 2
-        total_var = var0 + var1
-        up = pykelihood.distributions.Normal().ppf(1 - conf / 2)
-        down = pykelihood.distributions.Normal().ppf(conf / 2)
-        log_lb = np.log(p1 / p0) + down * np.sqrt(total_var)
-        log_ub = np.log(p1 / p0) + up * np.sqrt(total_var)
-        return [np.exp(log_lb), np.exp(log_ub)]
-
-    p1 = std_prev.optimum[0].p()
-    p0 = std_hist.optimum[0].p()
-    dic['Standard'] = [p1 / p0] + get_CI_for_rr_from_hessian(std_prev.optimum[0].p(), std_hist.optimum[0].p(), std_prev.optimum[0].scipy_res.hess_inv, std_hist.optimum[0].scipy_res.hess_inv)
-    p1 = cond_prev.optimum[0].p()
-    p0 = cond_hist.optimum[0].p()
-    dic['COND'] = [p1 / p0] + get_CI_for_rr_from_hessian(cond_prev.optimum[0].p(), cond_hist.optimum[0].p(), cond_prev.optimum[0].scipy_res.hess_inv, cond_hist.optimum[0].scipy_res.hess_inv)
-    p1 = ex_prev.optimum[0].p()
-    p0 = ex_hist.optimum[0].p()
-    dic['Excluding'] = [p1 / p0] + get_CI_for_rr_from_hessian(ex_prev.optimum[0].p(), ex_hist.optimum[0].p(), condex_prev.optimum[0].scipy_res.hess_inv, condex_hist.optimum[0].scipy_res.hess_inv)
-    p1 = condex_prev.optimum[0].p()
-    p0 = condex_hist.optimum[0].p()
-    dic['CONDEX'] = [p1 / p0] + get_CI_for_rr_from_hessian(condex_prev.optimum[0].p(), condex_hist.optimum[0].p(), condex_prev.optimum[0].scipy_res.hess_inv, condex_hist.optimum[0].scipy_res.hess_inv)
+    std_hist, cond_hist = get_std_cond_fits_for_year_and_event(x, y, year_past, event=event)
+    ex_now, condex_now = get_std_cond_fits_for_year_and_event(x, y, year_now, event=event, including=False)
+    ex_hist, condex_hist = get_std_cond_fits_for_year_and_event(x, y, year_past, event=event, including=False)
+    std_now, cond_now = get_std_cond_fits_for_year_and_event(x, y, year_now, event=event)
+    for (fit_hist, fit_now), name in zip(
+            [(std_hist, std_now), (cond_hist, cond_now), (ex_hist, ex_now), (condex_hist, condex_now)],
+            ["Standard", "COND", "Excluding", "CONDEX"]):
+        p1 = fit_now.p()
+        p0 = fit_hist.p()
+        print(name, p0, p1)
+        dic[name] = [p1 / p0] + get_CI_for_rr_from_hessian(y, p1, p0, fit_now.fit_result.hess_inv,
+                                                           fit_hist.fit_result.hess_inv)
     return dic
 
 
@@ -204,6 +211,6 @@ if __name__ == '__main__':
     portland = stations[stations.NAME == 'PORTLAND'].STATION.values[0]
     x = data.TEMPANOMALY_GLOB
     y = data[portland]
-    plot_loc_vs_anomaly(x, y)
+    plot_loc_and_rl(x, y)
     dic = get_risk_ratio_and_CI(x, y)
     print(dic)
