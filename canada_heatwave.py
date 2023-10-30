@@ -167,8 +167,10 @@ def get_std_cond_fits_for_year_and_event(x, y, year, event=41.7, including=True,
                                              scipy_args={"method": optim, "bounds": [(p - p_tol, p + p_tol)],
                                                          "options": {"ftol": 1e-15}})
     historical_sample_size = len([i for i in y.index if i <= 2010])
-    sr = StoppingRule(data=tx, k=event, distribution=gev_fit,
-                      func=StoppingRule.fixed_to_k,
+    k = event if detrend_y else 200
+    func = StoppingRule.fixed_to_k if detrend_y else StoppingRule.variable_in_the_estimated_rl_with_trend_in_loc
+    sr = StoppingRule(data=tx, k=k, distribution=gev_fit,
+                      func=func,
                       historical_sample_size=historical_sample_size)
     thresh, N = sr.c, sr.N
     len_extreme_event = 1
