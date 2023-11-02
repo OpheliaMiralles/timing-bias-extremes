@@ -167,7 +167,9 @@ def get_std_cond_fits_for_year_and_event(x, y, year, event=41.7, including=True,
                                              scipy_args={"method": optim, "bounds": [(p - p_tol, p + p_tol)],
                                                          "options": {"ftol": 1e-15}})
     historical_sample_size = len([i for i in y.index if i <= 2010])
-    k = event if detrend_y else 200
+    # the stopping rule is either fixed if data is detrended or variable if there is a trend
+    # always corresponds to the empirical 200-year return level but could be for instance the second more extreme event
+    k = tx.quantile(1-1/200) if detrend_y else 200
     func = StoppingRule.fixed_to_k if detrend_y else StoppingRule.variable_in_the_estimated_rl_with_trend_in_loc
     sr = StoppingRule(data=tx, k=k, distribution=gev_fit,
                       func=func,
